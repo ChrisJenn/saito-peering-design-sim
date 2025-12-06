@@ -406,8 +406,560 @@ async function buildTopology() {
     console.log('    - Topology complete, total links:', links.length);
 }
 
+// Global variables for 3D scene
+let scene3d = null;
+let camera3d = null;
+let renderer3d = null;
+let controls3d = null;
+let globeMesh = null;
+let nodeMeshes = [];
+let linkMeshes = [];
+let labelSprites = []; // Store label sprites for scaling
+let raycaster = null;
+let mouse = new THREE.Vector2();
+let animationId = null;
+
+// Convert lat/lon to 3D coordinates on a sphere
+function latLonTo3D(lat, lon, radius = 100) {
+    const phi = (90 - lat) * (Math.PI / 180); // Convert latitude to radians (0 to π)
+    const theta = (lon + 180) * (Math.PI / 180); // Convert longitude to radians (0 to 2π)
+    
+    const x = -radius * Math.sin(phi) * Math.cos(theta);
+    const y = radius * Math.cos(phi);
+    const z = radius * Math.sin(phi) * Math.sin(theta);
+    
+    return new THREE.Vector3(x, y, z);
+}
+
+// Create a great circle arc between two points on a sphere
+function createGreatCircleArc(start, end, radius = 100, segments = 50) {
+    // Normalize vectors
+    const v1 = start.clone().normalize();
+    const v2 = end.clone().normalize();
+    
+    // Calculate angle between vectors
+    const angle = Math.acos(Math.max(-1, Math.min(1, v1.dot(v2))));
+    
+    // Create points along the great circle
+    const points = [];
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const theta = angle * t;
+        
+        // Interpolate along the great circle
+        const sinTheta = Math.sin(theta);
+        const sinAngle = Math.sin(angle);
+        
+        if (sinAngle === 0) {
+            // Points are the same or opposite
+            points.push(v1.clone().multiplyScalar(radius));
+        } else {
+            const a = Math.sin(angle - theta) / sinAngle;
+            const b = sinTheta / sinAngle;
+            const point = v1.clone().multiplyScalar(a).add(v2.clone().multiplyScalar(b));
+            points.push(point.normalize().multiplyScalar(radius));
+        }
+    }
+    
+    // Create curve
+    const curve = new THREE.CatmullRomCurve3(points);
+    return curve;
+}
+
+// Visualize network in 3D
+function visualize3D() {
+    console.log('visualize3D() called, nodes:', nodes.length, 'links:', links.length);
+    
+    const canvas = document.getElementById('visualization3d');
+    if (!canvas) {
+        console.error('Canvas element #visualization3d not found!');
+        return;
+    }
+    
+    const width = 1200;
+    const height = 800;
+    
+    // Clear previous scene if it exists
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+    }
+    if (renderer3d) {
+        renderer3d.dispose();
+    }
+    if (scene3d) {
+        // Dispose of geometries and materials
+        scene3d.traverse((object) => {
+            if (object.geometry) object.geometry.dispose();
+            if (object.material) {
+                if (Array.isArray(object.material)) {
+                    object.material.forEach(m => m.dispose());
+                } else {
+                    object.material.dispose();
+                }
+            }
+        });
+    }
+    
+    // Create scene
+    scene3d = new THREE.Scene();
+    scene3d.background = new THREE.Color(0xffffff); // White background
+    console.log('[3D] Scene created, background set to:', scene3d.background.getHexString());
+    
+    // Create camera
+    camera3d = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
+    camera3d.position.set(0, 0, 400);
+    
+    // Create renderer
+    renderer3d = new THREE.WebGLRenderer({ 
+        canvas: canvas, 
+        antialias: true,
+        alpha: false, // No transparency
+        powerPreference: "high-performance"
+    });
+    renderer3d.setSize(width, height);
+    renderer3d.setPixelRatio(window.devicePixelRatio);
+    renderer3d.setClearColor(0xffffff, 1.0); // Ensure white background with full opacity
+    renderer3d.autoClear = true; // Auto clear with background color
+    renderer3d.clear(); // Explicitly clear once
+    const clearColor = new THREE.Color();
+    renderer3d.getClearColor(clearColor);
+    console.log('[3D] Renderer created, clearColor:', clearColor.getHexString(), 'alpha:', renderer3d.getClearAlpha());
+    console.log('[3D] Canvas computed background:', window.getComputedStyle(canvas).backgroundColor);
+    console.log('[3D] Canvas inline style background:', canvas.style.backgroundColor);
+    
+    // Also set canvas background via CSS as fallback
+    canvas.style.backgroundColor = '#ffffff';
+    
+    // Add orbit controls
+    try {
+        if (typeof THREE.OrbitControls !== 'undefined') {
+            controls3d = new THREE.OrbitControls(camera3d, renderer3d.domElement);
+        } else if (typeof OrbitControls !== 'undefined') {
+            controls3d = new OrbitControls(camera3d, renderer3d.domElement);
+        } else {
+            throw new Error('OrbitControls not found');
+        }
+        controls3d.enableDamping = true;
+        controls3d.dampingFactor = 0.05;
+        controls3d.minDistance = 150;
+        controls3d.maxDistance = 800;
+    } catch (e) {
+        console.warn('OrbitControls not available, using manual controls:', e);
+        // Simple manual rotation
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            previousMousePosition = { x: e.clientX, y: e.clientY };
+        });
+        
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const deltaX = e.clientX - previousMousePosition.x;
+                const deltaY = e.clientY - previousMousePosition.y;
+                
+                const spherical = new THREE.Spherical();
+                spherical.setFromVector3(camera3d.position);
+                spherical.theta -= deltaX * 0.01;
+                spherical.phi += deltaY * 0.01;
+                spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+                
+                camera3d.position.setFromSpherical(spherical);
+                camera3d.lookAt(0, 0, 0);
+                
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+            }
+        });
+        
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+        
+        canvas.addEventListener('wheel', (e) => {
+            const delta = e.deltaY * 0.01;
+            const distance = camera3d.position.length();
+            const newDistance = Math.max(150, Math.min(800, distance + delta));
+            camera3d.position.normalize().multiplyScalar(newDistance);
+        });
+    }
+    
+    // Add lights - bright for good visibility
+    const ambientLight = new THREE.AmbientLight(0x808080, 1.2); // Bright ambient
+    scene3d.add(ambientLight);
+    
+    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 1.5); // Bright main light
+    directionalLight1.position.set(1, 1, 1);
+    scene3d.add(directionalLight1);
+    
+    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.8); // Fill light
+    directionalLight2.position.set(-1, -1, -1);
+    scene3d.add(directionalLight2);
+    
+    // Add additional light from top for better visibility
+    const directionalLight3 = new THREE.DirectionalLight(0xffffff, 0.7);
+    directionalLight3.position.set(0, 1, 0);
+    scene3d.add(directionalLight3);
+    
+    // Create globe (sphere) with world map texture
+    const globeGeometry = new THREE.SphereGeometry(100, 64, 64);
+    const textureLoader = new THREE.TextureLoader();
+    
+    // Create globe material - start with fallback, update when texture loads
+    const globeMaterial = new THREE.MeshPhongMaterial({
+        color: 0x7fb069, // Brighter green for better visibility on white
+        transparent: false, // Not transparent - solid
+        opacity: 1.0, // Fully opaque
+        side: THREE.DoubleSide,
+        shininess: 30,
+        visible: true, // Ensure it's visible
+        emissive: 0x000000, // No emissive initially
+        emissiveIntensity: 0.0
+    });
+    console.log('[3D] Globe material created - color:', globeMaterial.color.getHexString(),
+                'emissive:', globeMaterial.emissive ? globeMaterial.emissive.getHexString() : 'none',
+                'emissiveIntensity:', globeMaterial.emissiveIntensity,
+                'opacity:', globeMaterial.opacity,
+                'transparent:', globeMaterial.transparent);
+    globeMesh = new THREE.Mesh(globeGeometry, globeMaterial);
+    globeMesh.visible = true; // Explicitly set visible
+    scene3d.add(globeMesh);
+    console.log('[3D] Globe mesh created, color:', globeMaterial.color.getHexString(), 
+                'emissive:', globeMaterial.emissive ? globeMaterial.emissive.getHexString() : 'none',
+                'emissiveIntensity:', globeMaterial.emissiveIntensity,
+                'map:', globeMaterial.map ? 'present' : 'none',
+                'visible:', globeMesh.visible);
+    
+    // Load world map texture - using a reliable public world map
+    const worldMapUrls = [
+        'https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg',
+        'https://raw.githubusercontent.com/turban/webgl-earth/master/images/2_no_clouds_4k.jpg',
+        'https://upload.wikimedia.org/wikipedia/commons/8/83/Equirectangular_projection_SW.jpg'
+    ];
+    
+    // Try to load texture from first available source
+    const tryLoadTexture = (urlIndex) => {
+        if (urlIndex >= worldMapUrls.length) {
+            console.warn('[3D] All world map texture sources failed, using colored globe');
+            console.log('[3D] Scene background at fallback:', scene3d.background ? scene3d.background.getHexString() : 'null');
+            // Ensure globe stays visible with fallback color
+            globeMaterial.color.setHex(0x7fb069); // Bright green
+            globeMaterial.visible = true;
+            console.log('[3D] Globe material fallback set, color:', globeMaterial.color.getHexString());
+            return;
+        }
+        
+        textureLoader.load(
+            worldMapUrls[urlIndex],
+            function(texture) {
+                console.log('[3D] World map texture loaded from source', urlIndex + 1);
+                console.log('[3D] Scene background before texture load:', scene3d.background ? scene3d.background.getHexString() : 'null');
+                globeMaterial.map = texture;
+                globeMaterial.transparent = false; // Solid, not transparent
+                globeMaterial.opacity = 1.0; // Fully opaque
+                // Brighten the texture for visibility on white background
+                globeMaterial.emissive = new THREE.Color(0x444444); // More glow to brighten
+                globeMaterial.emissiveIntensity = 0.5; // Higher intensity
+                // Use a lighter base color to brighten the texture
+                globeMaterial.color.setHex(0xffffff); // White base to brighten texture
+                globeMaterial.needsUpdate = true;
+                console.log('[3D] Texture applied - ensuring scene background stays white');
+                console.log('[3D] Globe material after texture - color:', globeMaterial.color.getHexString(),
+                           'emissive:', globeMaterial.emissive.getHexString(),
+                           'emissiveIntensity:', globeMaterial.emissiveIntensity,
+                           'opacity:', globeMaterial.opacity,
+                           'transparent:', globeMaterial.transparent,
+                           'map:', globeMaterial.map ? 'present' : 'none');
+                scene3d.background = new THREE.Color(0xffffff); // Re-ensure white background
+                console.log('[3D] Globe material updated, color:', globeMaterial.color.getHexString());
+                console.log('[3D] Scene background after texture load:', scene3d.background ? scene3d.background.getHexString() : 'null');
+            },
+            undefined,
+            function(error) {
+                console.warn('[3D] Failed to load texture from source', urlIndex + 1, ', trying next...', error);
+                tryLoadTexture(urlIndex + 1);
+            }
+        );
+    };
+    
+    // Start loading texture
+    tryLoadTexture(0);
+    
+    // Add subtle wireframe for reference - darker for white background
+    const wireframeGeometry = new THREE.SphereGeometry(100.1, 32, 32);
+    const wireframeMaterial = new THREE.MeshBasicMaterial({
+        color: 0xcccccc, // Light gray for white background
+        wireframe: true,
+        transparent: true,
+        opacity: 0.3
+    });
+    const wireframe = new THREE.Mesh(wireframeGeometry, wireframeMaterial);
+    scene3d.add(wireframe);
+    
+    // Clear previous meshes
+    nodeMeshes = [];
+    linkMeshes = [];
+    labelSprites = [];
+    
+    // Create nodes - darker green for visibility on white background
+    const nodeGeometry = new THREE.SphereGeometry(2, 16, 16);
+    const nodeMaterial = new THREE.MeshPhongMaterial({ color: 0x2e7d32 }); // Darker green
+    
+    nodes.forEach((node, index) => {
+        const position = latLonTo3D(node.lat, node.lon, 100);
+        node.position3d = position;
+        
+        const nodeMesh = new THREE.Mesh(nodeGeometry, nodeMaterial.clone());
+        nodeMesh.position.copy(position);
+        nodeMesh.userData = { node: node, index: index };
+        scene3d.add(nodeMesh);
+        nodeMeshes.push(nodeMesh);
+        
+        // Add label (using sprite or text) - text with outline, no background box
+        const canvas2d = document.createElement('canvas');
+        const context = canvas2d.getContext('2d');
+        // Make canvas just big enough for text
+        context.font = '12px Arial';
+        const metrics = context.measureText(node.name);
+        const textWidth = metrics.width;
+        const textHeight = 12;
+        canvas2d.width = textWidth + 8; // Add padding for outline
+        canvas2d.height = textHeight + 8;
+        
+        // Clear canvas (transparent)
+        context.clearRect(0, 0, canvas2d.width, canvas2d.height);
+        
+        // Draw text with outline (stroke)
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.font = '12px Arial';
+        context.strokeStyle = '#ffffff'; // White outline
+        context.lineWidth = 3;
+        context.lineJoin = 'round';
+        context.miterLimit = 2;
+        context.strokeText(node.name, canvas2d.width / 2, canvas2d.height / 2);
+        context.fillStyle = '#000000'; // Black text
+        context.fillText(node.name, canvas2d.width / 2, canvas2d.height / 2);
+        
+        const texture = new THREE.CanvasTexture(canvas2d);
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        sprite.position.copy(position);
+        sprite.position.multiplyScalar(1.02); // Very close to the node surface
+        sprite.userData = { node: node, baseScale: 20 }; // Store base scale for distance scaling
+        scene3d.add(sprite);
+        labelSprites.push(sprite); // Store sprite for scaling updates
+    });
+    
+    // Create links as great circle arcs - use tubes for thicker, more visible lines
+    const linkMaterial = new THREE.MeshPhongMaterial({ 
+        color: 0x333333, // Dark gray for better visibility
+        opacity: 0.9, 
+        transparent: true,
+        side: THREE.DoubleSide
+    });
+    
+    links.forEach((link) => {
+        const start = latLonTo3D(link.source.lat, link.source.lon, 100);
+        const end = latLonTo3D(link.target.lat, link.target.lon, 100);
+        
+        const curve = createGreatCircleArc(start, end, 100, 50);
+        
+        // Create a tube geometry for thicker, more visible lines
+        const tubeGeometry = new THREE.TubeGeometry(curve, 50, 0.3, 8, false);
+        const tube = new THREE.Mesh(tubeGeometry, linkMaterial.clone());
+        tube.userData = { link: link };
+        scene3d.add(tube);
+        linkMeshes.push(tube);
+    });
+    
+    // Raycaster for mouse interaction
+    raycaster = new THREE.Raycaster();
+    
+    // Mouse move handler for tooltips
+    let hoveredNode = null;
+    canvas.addEventListener('mousemove', (event) => {
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        
+        raycaster.setFromCamera(mouse, camera3d);
+        const intersects = raycaster.intersectObjects(nodeMeshes);
+        
+        const tooltip = d3.select('#tooltip');
+        
+        if (intersects.length > 0) {
+            const node = intersects[0].object.userData.node;
+            if (hoveredNode !== node) {
+                hoveredNode = node;
+                // Highlight node
+                nodeMeshes.forEach(m => {
+                    if (m.userData.node === node) {
+                        m.material.color.setHex(0xff6b6b); // Red for hover
+                        m.scale.set(1.5, 1.5, 1.5);
+                    } else {
+                        m.material.color.setHex(0x2e7d32); // Darker green default
+                        m.scale.set(1, 1, 1);
+                    }
+                });
+                // Highlight connected links
+                linkMeshes.forEach(m => {
+                    const link = m.userData.link;
+                    if (link.source === node || link.target === node) {
+                        m.material.color.setHex(0xff6b6b); // Red for hover
+                        m.material.opacity = 1;
+                    } else {
+                        m.material.color.setHex(0x333333); // Dark gray default
+                        m.material.opacity = 0.9;
+                    }
+                });
+                
+                tooltip
+                    .style('opacity', 1)
+                    .html(`<strong>${node.name}</strong><br/>${node.city}, ${node.country}<br/>Peers: ${getPeerCount(nodes.indexOf(node))}`)
+                    .style('left', (event.clientX + 10) + 'px')
+                    .style('top', (event.clientY - 10) + 'px');
+            }
+        } else {
+            if (hoveredNode) {
+                hoveredNode = null;
+                nodeMeshes.forEach(m => {
+                    m.material.color.setHex(0x2e7d32); // Darker green default
+                    m.scale.set(1, 1, 1);
+                });
+                linkMeshes.forEach(m => {
+                    m.material.color.setHex(0x333333); // Dark gray default
+                    m.material.opacity = 0.9;
+                });
+                tooltip.style('opacity', 0);
+            }
+        }
+    });
+    
+    // Animation loop
+    let frameCount = 0;
+    function animate() {
+        animationId = requestAnimationFrame(animate);
+        
+        if (controls3d && controls3d.update) {
+            controls3d.update();
+        }
+        
+        // Ensure background stays white
+        if (scene3d.background) {
+            const currentBg = scene3d.background.getHex();
+            if (currentBg !== 0xffffff) {
+                console.warn('[3D] Frame', frameCount, '- Background changed to', currentBg.toString(16), ', resetting to white');
+                scene3d.background.setHex(0xffffff);
+            }
+        } else {
+            console.warn('[3D] Frame', frameCount, '- Background is null, setting to white');
+            scene3d.background = new THREE.Color(0xffffff);
+        }
+        
+        // Log every 60 frames (about once per second at 60fps)
+        if (frameCount % 60 === 0) {
+            const clearColor = new THREE.Color();
+            renderer3d.getClearColor(clearColor);
+            const globeColor = globeMesh && globeMesh.material ? globeMesh.material.color.getHexString() : 'null';
+            const globeEmissive = globeMesh && globeMesh.material && globeMesh.material.emissive ? 
+                                 globeMesh.material.emissive.getHexString() : 'none';
+            const globeEmissiveIntensity = globeMesh && globeMesh.material ? 
+                                           globeMesh.material.emissiveIntensity : 'null';
+            const globeMap = globeMesh && globeMesh.material && globeMesh.material.map ? 'present' : 'none';
+            console.log('[3D] Frame', frameCount, '- Background:', scene3d.background ? scene3d.background.getHexString() : 'null', 
+                       'ClearColor:', clearColor.getHexString(),
+                       'Globe visible:', globeMesh ? globeMesh.visible : 'null',
+                       'Globe color:', globeColor,
+                       'Globe emissive:', globeEmissive,
+                       'Globe emissiveIntensity:', globeEmissiveIntensity,
+                       'Globe map:', globeMap,
+                       'Globe opacity:', globeMesh && globeMesh.material ? globeMesh.material.opacity : 'null');
+        }
+        
+        frameCount++;
+        
+        // Scale labels based on camera distance to prevent overlap when zooming
+        // Labels should get smaller when zooming in (camera closer)
+        const cameraDistance = camera3d.position.length();
+        const baseDistance = 400; // Reference distance
+        // Invert: when camera is closer (smaller distance), scale factor should be smaller
+        const scaleFactor = Math.max(0.2, Math.min(1.5, cameraDistance / baseDistance)); // Scale between 0.2x and 1.5x
+        
+        labelSprites.forEach(sprite => {
+            if (sprite.userData.baseScale) {
+                const scaledSize = sprite.userData.baseScale * scaleFactor;
+                sprite.scale.set(scaledSize, scaledSize * 0.5, 1); // Maintain aspect ratio
+            }
+        });
+        
+        // Force clear with white background before rendering
+        renderer3d.setClearColor(0xffffff, 1.0);
+        if (!scene3d.background) {
+            scene3d.background = new THREE.Color(0xffffff);
+        } else {
+            scene3d.background.setHex(0xffffff);
+        }
+        
+        // Explicitly clear before render
+        renderer3d.clear();
+        renderer3d.render(scene3d, camera3d);
+    }
+    
+    animate();
+    
+    console.log('[3D] Visualization complete');
+    console.log('[3D] Initial state - Scene background:', scene3d.background ? scene3d.background.getHexString() : 'null');
+    const initClearColor = new THREE.Color();
+    renderer3d.getClearColor(initClearColor);
+    console.log('[3D] Initial state - Renderer clearColor:', initClearColor.getHexString());
+    console.log('[3D] Initial state - Globe visible:', globeMesh.visible, 
+                'Globe color:', globeMaterial.color.getHexString(),
+                'Globe emissive:', globeMaterial.emissive ? globeMaterial.emissive.getHexString() : 'none',
+                'Globe emissiveIntensity:', globeMaterial.emissiveIntensity,
+                'Globe map:', globeMaterial.map ? 'present' : 'none',
+                'Globe opacity:', globeMaterial.opacity);
+    console.log('[3D] Canvas element style:', window.getComputedStyle(canvas).backgroundColor);
+    console.log('[3D] Canvas element background:', canvas.style.backgroundColor);
+}
+
+// Switch between 2D and 3D views
+function switchView() {
+    const viewMode = document.getElementById('viewMode').value;
+    const svg = document.getElementById('visualization');
+    const canvas = document.getElementById('visualization3d');
+    const viewControls = document.getElementById('viewControls');
+    
+    if (viewMode === '3d') {
+        svg.style.display = 'none';
+        canvas.style.display = 'block';
+        viewControls.style.display = 'none'; // Hide zoom controls in 3D
+        if (nodes.length > 0 && links.length > 0) {
+            visualize3D();
+        }
+    } else {
+        svg.style.display = 'block';
+        canvas.style.display = 'none';
+        viewControls.style.display = 'block';
+        if (nodes.length > 0 && links.length > 0) {
+            visualize();
+        }
+    }
+}
+
+// Make switchView globally accessible
+window.switchView = switchView;
+
 // Visualize network
 function visualize() {
+    const viewMode = document.getElementById('viewMode')?.value || '2d';
+    
+    if (viewMode === '3d') {
+        visualize3D();
+        return;
+    }
+    
     console.log('visualize() called, nodes:', nodes.length, 'links:', links.length);
     const svg = d3.select('#visualization');
     if (svg.empty()) {
@@ -767,6 +1319,10 @@ function resetZoom() {
             .call(window.currentZoom.transform, d3.zoomIdentity);
     }
 }
+
+// Make functions globally accessible for inline event handlers
+window.generateNetwork = generateNetwork;
+window.resetZoom = resetZoom;
 
 // Initialize on page load
 if (document.readyState === 'loading') {

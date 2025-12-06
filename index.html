@@ -6,6 +6,8 @@
     <title>Saito Network Peering Design</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/topojson@3"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -84,14 +86,14 @@
             font-weight: bold;
             color: #2e7d32;
         }
-        #visualization {
+        #visualization, #visualization3d {
             border: 1px solid #ddd;
             border-radius: 5px;
             margin-bottom: 20px;
             background: white;
             cursor: grab;
         }
-        #visualization:active {
+        #visualization:active, #visualization3d:active {
             cursor: grabbing;
         }
         .node {
@@ -166,6 +168,13 @@
                     <option value="hybrid">Hybrid (MST + Greedy)</option>
                 </select>
             </div>
+            <div class="control-group">
+                <label>View Mode</label>
+                <select id="viewMode" onchange="switchView()">
+                    <option value="2d" selected>2D Map</option>
+                    <option value="3d">3D Globe</option>
+                </select>
+            </div>
             <button onclick="generateNetwork()" id="generateBtn">Generate Network</button>
             <span id="loading" style="display: none; margin-left: 10px; color: #666;">Generating network...</span>
         </div>
@@ -190,8 +199,9 @@
         </div>
 
         <div style="position: relative;">
-            <svg id="visualization" width="1200" height="800"></svg>
-            <div style="position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.9); padding: 10px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <svg id="visualization" width="1200" height="800" style="display: block;"></svg>
+            <canvas id="visualization3d" width="1200" height="800" style="display: none;"></canvas>
+            <div id="viewControls" style="position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.9); padding: 10px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                 <div style="margin-bottom: 5px; font-size: 12px; color: #666;">Zoom Controls</div>
                 <button onclick="resetZoom()" style="padding: 5px 10px; font-size: 12px; margin-right: 5px;">Reset View</button>
                 <span id="zoomLevel" style="font-size: 11px; color: #666;">100%</span>
@@ -219,11 +229,12 @@
         </table>
     </div>
 
-    <script src="network.js" onerror="console.error('Failed to load network.js')"></script>
+    <script src="network.js" onerror="console.error('Failed to load network.js'); window.networkJsError = true;"></script>
     <script>
         // Debug: Verify page loaded
         console.log('HTML page loaded at', new Date().toISOString());
         console.log('D3.js available:', typeof d3 !== 'undefined');
+        console.log('THREE.js available:', typeof THREE !== 'undefined');
         
         // Verify DOM is ready
         function checkDOM() {
@@ -267,16 +278,21 @@
         
         // Check if network.js loaded after a delay
         setTimeout(function() {
-            if (typeof generateNetwork === 'undefined') {
+            if (window.networkJsError || typeof generateNetwork === 'undefined' || typeof window.generateNetwork === 'undefined') {
                 console.error('generateNetwork function not found - network.js may not have loaded');
+                console.error('generateNetwork type:', typeof generateNetwork);
+                console.error('window.generateNetwork type:', typeof window.generateNetwork);
                 const errorMsg = document.getElementById('errorMessage');
                 const errorText = document.getElementById('errorText');
                 if (errorMsg && errorText) {
                     errorMsg.style.display = 'block';
-                    errorText.textContent = 'network.js failed to load. Please check the Network tab in DevTools.';
+                    errorText.textContent = 'network.js failed to load or encountered an error. Please check the browser console for details and verify network.js is accessible.';
                 }
             } else {
                 console.log('✓ network.js loaded successfully');
+                console.log('✓ generateNetwork available:', typeof generateNetwork !== 'undefined');
+                console.log('✓ switchView available:', typeof switchView !== 'undefined');
+                console.log('✓ resetZoom available:', typeof resetZoom !== 'undefined');
             }
             
             // Verify DOM structure
